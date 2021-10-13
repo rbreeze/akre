@@ -1,21 +1,26 @@
 #!/usr/bin/env node
 
-const pino = require("pino");
 const fs = require("fs");
-const ncp = require("ncp");
+const shell = require("child_process").execSync;
 const path = require("path");
 const yaml = require("js-yaml");
-const sass = require("sass");
 const Handlebars = require("handlebars");
 const chokidar = require("chokidar");
 const handler = require("serve-handler");
 const http = require("http");
 const { exit } = require("process");
 
-const logger = pino({ prettyPrint: { colorize: true } });
-const args = process.argv.slice(2);
+const postcss = require("postcss");
 
-const stripExtension = (filename) => path.parse(filename).name;
+const _GREEN = "\x1b[32m";
+const _RED = "\x1b[31m";
+const _RESET = "\x1b[0m";
+const logger = {
+  error: (s) => console.log(`${_RED}[ERROR]${_RESET} ${s}`),
+  info: (s) => console.log(`${_GREEN}[INFO]${_RESET} ${s}`),
+};
+
+const args = process.argv.slice(2);
 
 const TEMPLATE_EXT = ".hbs";
 const DATA_EXT = ".yaml";
@@ -25,20 +30,24 @@ const PORT = 3000;
 const SOURCE = "./src";
 const PAGES_PATH = `${SOURCE}/pages`;
 const PARTIALS_PATH = `${SOURCE}/partials`;
-const STYLES_PATH = `${SOURCE}/style`;
 const STATIC_PATH = `${SOURCE}/static`;
 const GLOBALS_PATH = `${SOURCE}/globals${DATA_EXT}`;
+const STYLES_PATH = `${SOURCE}/styles/main.css`;
 
 // Output
 const BUILD_TARGET = "./dist";
 const ASSETS_TARGET = `${BUILD_TARGET}/assets`;
-const STYLES_TARGET = `${ASSETS_TARGET}/css`;
-const MAIN_STYLE = "main";
+const STYLES_TARGET = `${ASSETS_TARGET}/css/main.css`;
+
+const tailwindcss = require("tailwindcss")({
+  mode: "jit",
+  purge: [`${PAGES_PATH}/**/*`],
+});
 
 const build = () => {
   const start = Date.now();
   try {
-    fs.mkdirSync(STYLES_TARGET, { recursive: true });
+    fs.mkdirSync(ASSETS_TARGET, { recursive: true });
   } catch (e) {
     logger.error(`Could not create target directory: ${e}`);
   }
@@ -49,7 +58,14 @@ const build = () => {
     return new Handlebars.SafeString(text);
   });
 
-  for (const file of fs.readdirSync(PARTIALS_PATH)) {
+  let partials = [];
+  try {
+    partials = fs.readdirSync(PARTIALS_PATH);
+  } catch (e) {
+    logger.error(e);
+  }
+
+  for (const file of partials) {
     if (path.extname(file) !== TEMPLATE_EXT) {
       logger.info(
         `Partials directory contains non ${TEMPLATE_EXT} file: ${file}`
@@ -58,7 +74,7 @@ const build = () => {
     }
 
     Handlebars.registerPartial(
-      stripExtension(file),
+      path.parse(file).name,
       fs.readFileSync(`${PARTIALS_PATH}/${file}`).toString()
     );
   }
@@ -70,12 +86,15 @@ const build = () => {
     logger.error(`Could not load globals: ${e}`);
   }
 
-  fs.writeFileSync(
-    `${STYLES_TARGET}/${MAIN_STYLE}.css`,
-    sass.renderSync({ file: `${STYLES_PATH}/${MAIN_STYLE}.scss` }).css
-  );
+  let pages = [];
+  try {
+    pages = fs.readdirSync(PAGES_PATH);
+  } catch (e) {
+    logger.error(e);
+    exit(1);
+  }
 
-  for (const page of fs.readdirSync(PAGES_PATH)) {
+  for (const page of pages) {
     const pathFor = (page, ext) => `${PAGES_PATH}/${page}/${page}${ext}`;
     const readExt = (ext) => fs.readFileSync(pathFor(page, ext));
     const extExists = (ext) => fs.existsSync(pathFor(page, ext));
@@ -86,18 +105,6 @@ const build = () => {
     } else if (!extExists(TEMPLATE_EXT)) {
       logger.error(`Template file not found for page ${page}`);
       continue;
-    }
-
-    const stylesheets = [
-      path.relative(BUILD_TARGET, `${STYLES_TARGET}/${MAIN_STYLE}.css`),
-    ];
-    try {
-      const result = sass.renderSync({ file: pathFor(page, ".scss") });
-      fs.writeFileSync(`${STYLES_TARGET}/${page}.css`, result.css);
-    } finally {
-      stylesheets.push(
-        path.relative(BUILD_TARGET, `${STYLES_TARGET}/${page}.css`)
-      );
     }
 
     let parsed = {};
@@ -112,20 +119,29 @@ const build = () => {
       const p = page === "index" ? "index.html" : page;
       fs.writeFileSync(
         `${BUILD_TARGET}/${p}`,
-        template({ ...parsed, globals, stylesheets })
+        template({
+          ...parsed,
+          globals,
+        })
       );
     } catch (e) {
       logger.error(`Could not render template ${page}${TEMPLATE_EXT}: ${e}`);
     }
   }
 
-  ncp(STATIC_PATH, ASSETS_TARGET, () => null);
+  const css = fs.readFileSync(STYLES_PATH);
+  postcss([require("autoprefixer"), require("postcss-import"), tailwindcss])
+    .process(css, { from: STYLES_PATH, to: STYLES_TARGET })
+    .then((result) => {
+      fs.writeFileSync(STYLES_TARGET, result.css);
+    });
 
-  const end = Date.now();
-  logger.info(`build executed in ${end - start}ms`);
+  shell(`cp -r ${STATIC_PATH}/* ${ASSETS_TARGET}`);
+  logger.info(`build executed in ${Date.now() - start}ms`);
 };
 
 const watch = () => {
+  build();
   http
     .createServer((req, res) => handler(req, res, { public: BUILD_TARGET }))
     .listen(PORT, () => {
@@ -138,40 +154,9 @@ const watch = () => {
   });
 };
 
-const newPage = (name) => {
-  fs.mkdirSync(`${PAGES_PATH}/${name}`, { recursive: true });
-
-  const nf = (exts) =>
-    exts.forEach((ext) =>
-      fs.writeFileSync(`${PAGES_PATH}/${name}/${name}${ext}`, "")
-    );
-
-  nf([".scss", TEMPLATE_EXT, DATA_EXT]);
-};
-
 const commands = {
   watch: watch,
   build: build,
-  new: () => {
-    try {
-      newPage(args[1]),
-        logger.info(`Successfully created directory for page ${args[1]}`);
-    } catch (e) {
-      logger.error(e);
-    }
-  },
-  init: () => {
-    try {
-      [PAGES_PATH, PARTIALS_PATH, STYLES_PATH, STATIC_PATH].forEach((p) =>
-        fs.mkdirSync(p, { recursive: true })
-      );
-      newPage("index");
-      fs.writeFileSync(GLOBALS_PATH, "");
-      logger.info("Successfully initialized Akre structure");
-    } catch (e) {
-      logger.error(e);
-    }
-  },
 };
 
 let selected = null;
