@@ -37,7 +37,7 @@ const STYLES_PATH = `${SOURCE}/styles/main.css`;
 // Output
 const BUILD_TARGET = "./dist";
 const ASSETS_TARGET = `${BUILD_TARGET}/assets`;
-const STYLES_TARGET = `${ASSETS_TARGET}/css/main.css`;
+const STYLES_TARGET = `${ASSETS_TARGET}/css`;
 
 const tailwindcss = require("tailwindcss")({
   mode: "jit",
@@ -47,7 +47,7 @@ const tailwindcss = require("tailwindcss")({
 const build = () => {
   const start = Date.now();
   try {
-    fs.mkdirSync(ASSETS_TARGET, { recursive: true });
+    fs.mkdirSync(STYLES_TARGET, { recursive: true });
   } catch (e) {
     logger.error(`Could not create target directory: ${e}`);
   }
@@ -133,7 +133,7 @@ const build = () => {
   postcss([require("autoprefixer"), require("postcss-import"), tailwindcss])
     .process(css, { from: STYLES_PATH, to: STYLES_TARGET })
     .then((result) => {
-      fs.writeFileSync(STYLES_TARGET, result.css);
+      fs.writeFileSync(`${STYLES_TARGET}/main.css`, result.css);
     });
 
   shell(`cp -r ${STATIC_PATH}/* ${ASSETS_TARGET}`);
