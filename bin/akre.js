@@ -121,6 +121,7 @@ const build = () => {
         `${BUILD_TARGET}/${p}`,
         template({
           ...parsed,
+          metadata: { path: page },
           globals,
         })
       );
